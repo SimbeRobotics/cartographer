@@ -327,7 +327,10 @@ void LocalTrajectoryBuilder2D::InitializeExtrapolator(const common::Time time) {
                                               .pose_queue_duration()),
       options_.pose_extrapolator_options()
           .constant_velocity()
-          .imu_gravity_time_constant());
+          .imu_gravity_time_constant(),
+      options_.pose_extrapolator_options()
+          .constant_velocity()
+          .odometry_pose_extrapolation_gap_threshold());
   extrapolator_->AddPose(time, transform::Rigid3d::Identity());
 }
 

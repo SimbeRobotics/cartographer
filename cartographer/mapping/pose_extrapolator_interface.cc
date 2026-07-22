@@ -34,6 +34,12 @@ CreateConstantVelocityPoseExtrapolatorOptions(
       parameter_dictionary->GetDouble("pose_queue_duration"));
   options.set_imu_gravity_time_constant(
       parameter_dictionary->GetDouble("imu_gravity_time_constant"));
+  if (parameter_dictionary->HasKey(
+          "odometry_pose_extrapolation_gap_threshold")) {
+    options.set_odometry_pose_extrapolation_gap_threshold(
+        parameter_dictionary->GetDouble(
+            "odometry_pose_extrapolation_gap_threshold"));
+  }
   return options;
 }
 

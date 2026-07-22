@@ -27,6 +27,12 @@ message ConstantVelocityPoseExtrapolatorOptions {
   // constant is increased) is balanced.
   double imu_gravity_time_constant = 1;
   double pose_queue_duration = 2;
+
+  // For extrapolations farther than this many seconds from the last matched
+  // pose, compose the relative odometry transform instead of extending a
+  // single velocity estimate across the entire interval. A non-positive value
+  // disables this behavior.
+  double odometry_pose_extrapolation_gap_threshold = 3;
 }
 
 message ImuBasedPoseExtrapolatorOptions {

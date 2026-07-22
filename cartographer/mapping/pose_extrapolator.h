@@ -20,6 +20,7 @@
 #include <deque>
 #include <memory>
 
+#include "absl/types/optional.h"
 #include "cartographer/common/time.h"
 #include "cartographer/mapping/imu_tracker.h"
 #include "cartographer/mapping/pose_extrapolator_interface.h"
@@ -37,6 +38,9 @@ class PoseExtrapolator : public PoseExtrapolatorInterface {
  public:
   explicit PoseExtrapolator(common::Duration pose_queue_duration,
                             double imu_gravity_time_constant);
+  PoseExtrapolator(common::Duration pose_queue_duration,
+                   double imu_gravity_time_constant,
+                   double odometry_pose_extrapolation_gap_threshold);
 
   PoseExtrapolator(const PoseExtrapolator&) = delete;
   PoseExtrapolator& operator=(const PoseExtrapolator&) = delete;
@@ -70,8 +74,13 @@ class PoseExtrapolator : public PoseExtrapolatorInterface {
   Eigen::Quaterniond ExtrapolateRotation(common::Time time,
                                          ImuTracker* imu_tracker) const;
   Eigen::Vector3d ExtrapolateTranslation(common::Time time);
+  absl::optional<transform::Rigid3d> InterpolateOrExtrapolateOdometry(
+      common::Time time) const;
+  absl::optional<transform::Rigid3d> ExtrapolatePoseWithOdometry(
+      common::Time time) const;
 
   const common::Duration pose_queue_duration_;
+  const double odometry_pose_extrapolation_gap_threshold_;
   struct TimedPose {
     common::Time time;
     transform::Rigid3d pose;

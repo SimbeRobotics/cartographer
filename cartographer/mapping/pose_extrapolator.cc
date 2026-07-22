@@ -26,8 +26,16 @@ namespace cartographer {
 namespace mapping {
 
 PoseExtrapolator::PoseExtrapolator(const common::Duration pose_queue_duration,
-                                   double imu_gravity_time_constant)
+                                   const double imu_gravity_time_constant)
+    : PoseExtrapolator(pose_queue_duration, imu_gravity_time_constant, 0.) {}
+
+PoseExtrapolator::PoseExtrapolator(
+    const common::Duration pose_queue_duration,
+    const double imu_gravity_time_constant,
+    const double odometry_pose_extrapolation_gap_threshold)
     : pose_queue_duration_(pose_queue_duration),
+      odometry_pose_extrapolation_gap_threshold_(
+          odometry_pose_extrapolation_gap_threshold),
       gravity_time_constant_(imu_gravity_time_constant),
       cached_extrapolated_pose_{common::Time::min(),
                                 transform::Rigid3d::Identity()} {}
@@ -135,15 +143,104 @@ transform::Rigid3d PoseExtrapolator::ExtrapolatePose(const common::Time time) {
   const TimedPose& newest_timed_pose = timed_pose_queue_.back();
   CHECK_GE(time, newest_timed_pose.time);
   if (cached_extrapolated_pose_.time != time) {
-    const Eigen::Vector3d translation =
-        ExtrapolateTranslation(time) + newest_timed_pose.pose.translation();
-    const Eigen::Quaterniond rotation =
-        newest_timed_pose.pose.rotation() *
-        ExtrapolateRotation(time, extrapolation_imu_tracker_.get());
-    cached_extrapolated_pose_ =
-        TimedPose{time, transform::Rigid3d{translation, rotation}};
+    const double extrapolation_duration =
+        common::ToSeconds(time - newest_timed_pose.time);
+    const auto odometry_pose =
+        odometry_pose_extrapolation_gap_threshold_ > 0. &&
+                extrapolation_duration >=
+                    odometry_pose_extrapolation_gap_threshold_
+            ? ExtrapolatePoseWithOdometry(time)
+            : absl::nullopt;
+    if (odometry_pose.has_value()) {
+      // Keep GetLastExtrapolatedTime() monotonic even though the pose itself is
+      // obtained directly from the odometry transform history.
+      AdvanceImuTracker(time, extrapolation_imu_tracker_.get());
+      cached_extrapolated_pose_ = TimedPose{time, odometry_pose.value()};
+    } else {
+      const Eigen::Vector3d translation =
+          ExtrapolateTranslation(time) + newest_timed_pose.pose.translation();
+      const Eigen::Quaterniond rotation =
+          newest_timed_pose.pose.rotation() *
+          ExtrapolateRotation(time, extrapolation_imu_tracker_.get());
+      cached_extrapolated_pose_ =
+          TimedPose{time, transform::Rigid3d{translation, rotation}};
+    }
   }
   return cached_extrapolated_pose_.pose;
+}
+
+absl::optional<transform::Rigid3d>
+PoseExtrapolator::InterpolateOrExtrapolateOdometry(
+    const common::Time time) const {
+  if (odometry_data_.empty() || time < odometry_data_.front().time) {
+    return absl::nullopt;
+  }
+
+  const auto end = std::lower_bound(
+      odometry_data_.begin(), odometry_data_.end(), time,
+      [](const sensor::OdometryData& odometry_data,
+         const common::Time time) { return odometry_data.time < time; });
+  if (end != odometry_data_.end()) {
+    if (end->time == time) {
+      return end->pose;
+    }
+    if (end == odometry_data_.begin()) {
+      return absl::nullopt;
+    }
+    const auto start = std::prev(end);
+    const double duration = common::ToSeconds(end->time - start->time);
+    if (duration <= 0.) {
+      return absl::nullopt;
+    }
+    const double factor = common::ToSeconds(time - start->time) / duration;
+    return transform::Rigid3d(
+        start->pose.translation() +
+            factor * (end->pose.translation() - start->pose.translation()),
+        start->pose.rotation().slerp(factor, end->pose.rotation()));
+  }
+
+  if (odometry_data_.size() < 2) {
+    return absl::nullopt;
+  }
+  const auto newest = std::prev(odometry_data_.end());
+  auto previous = std::prev(newest);
+  while (previous != odometry_data_.begin() &&
+         previous->time == newest->time) {
+    --previous;
+  }
+  const double duration = common::ToSeconds(newest->time - previous->time);
+  if (duration <= 0.) {
+    return newest->pose;
+  }
+  const double factor = common::ToSeconds(time - newest->time) / duration;
+  const Eigen::Quaterniond rotation_delta =
+      previous->pose.rotation().inverse() * newest->pose.rotation();
+  const Eigen::Vector3d scaled_rotation_delta =
+      factor *
+      transform::RotationQuaternionToAngleAxisVector(rotation_delta);
+  return transform::Rigid3d(
+      newest->pose.translation() +
+          factor *
+              (newest->pose.translation() - previous->pose.translation()),
+      newest->pose.rotation() *
+          transform::AngleAxisVectorToRotationQuaternion(
+              scaled_rotation_delta));
+}
+
+absl::optional<transform::Rigid3d>
+PoseExtrapolator::ExtrapolatePoseWithOdometry(
+    const common::Time time) const {
+  const TimedPose& newest_timed_pose = timed_pose_queue_.back();
+  const auto odometry_at_last_pose =
+      InterpolateOrExtrapolateOdometry(newest_timed_pose.time);
+  const auto odometry_at_requested_time =
+      InterpolateOrExtrapolateOdometry(time);
+  if (!odometry_at_last_pose.has_value() ||
+      !odometry_at_requested_time.has_value()) {
+    return absl::nullopt;
+  }
+  return newest_timed_pose.pose * odometry_at_last_pose->inverse() *
+         odometry_at_requested_time.value();
 }
 
 Eigen::Quaterniond PoseExtrapolator::EstimateGravityOrientation(
@@ -197,13 +294,14 @@ void PoseExtrapolator::AdvanceImuTracker(const common::Time time,
                                          ImuTracker* const imu_tracker) const {
   CHECK_GE(time, imu_tracker->time());
   if (imu_data_.empty() || time < imu_data_.front().time) {
-    // There is no IMU data until 'time', so we advance the ImuTracker and use
-    // the angular velocities from poses and fake gravity to help 2D stability.
-    imu_tracker->Advance(time);
-    imu_tracker->AddImuLinearAccelerationObservation(Eigen::Vector3d::UnitZ());
+    // There is no IMU data until 'time', so install the current angular
+    // velocity before advancing the tracker. Otherwise the previous angular
+    // velocity is integrated over the entire interval.
     imu_tracker->AddImuAngularVelocityObservation(
         odometry_data_.size() < 2 ? angular_velocity_from_poses_
                                   : angular_velocity_from_odometry_);
+    imu_tracker->Advance(time);
+    imu_tracker->AddImuLinearAccelerationObservation(Eigen::Vector3d::UnitZ());
     return;
   }
   if (imu_tracker->time() < imu_data_.front().time) {
