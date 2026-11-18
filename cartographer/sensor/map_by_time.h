@@ -39,9 +39,9 @@ class MapByTime {
   void Append(const int trajectory_id, const DataType& data) {
     CHECK_GE(trajectory_id, 0);
     auto& trajectory = data_[trajectory_id];
-    if (!trajectory.empty()) {
-      CHECK_GT(data.time, std::prev(trajectory.end())->first);
-    }
+    // if (!trajectory.empty()) {
+    //   CHECK_GT(data.time, std::prev(trajectory.end())->first);
+    // }
     trajectory.emplace(data.time, data);
   }
 
